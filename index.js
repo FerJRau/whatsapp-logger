@@ -4,6 +4,8 @@ const Database = require('better-sqlite3');
 const pino = require('pino');
 const path = require('path');
 const WebSocket = require('ws');
+const http = require('http');
+const QRCode = require('qrcode');
 require('dotenv').config();
 
 // --- Configuration ---
@@ -13,8 +15,45 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
+const QR_PORT = process.env.QR_PORT || 3000;
+
 // --- Logger ---
 const logger = pino({ level: LOG_LEVEL });
+
+// --- QR Code web server ---
+let currentQR = null;
+let connectionStatus = 'disconnected';
+
+const qrServer = http.createServer(async (req, res) => {
+    if (connectionStatus === 'connected') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body style="background:#111;color:#0f0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace"><h1>Connected to WhatsApp</h1></body></html>');
+        return;
+    }
+    if (!currentQR) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body style="background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace"><h1>Waiting for QR code... Refresh in a few seconds.</h1></body></html>');
+        return;
+    }
+    try {
+        const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 400, margin: 2 });
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<html><body style="background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#fff">
+            <h2>Scan this QR with WhatsApp</h2>
+            <img src="${qrDataUrl}" style="border:8px solid white;border-radius:12px" />
+            <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+            <p style="color:#888">This page auto-refreshes every 15s</p>
+            <script>setTimeout(()=>location.reload(),15000)</script>
+        </body></html>`);
+    } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Error generating QR');
+    }
+});
+
+qrServer.listen(QR_PORT, () => {
+    logger.info(`QR code web server running on port ${QR_PORT}`);
+});
 
 // --- Supabase client (optional) ---
 let supabase = null;
@@ -192,10 +231,13 @@ async function startLogger() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            logger.info('QR code generated — scan with WhatsApp on the client phone');
+            currentQR = qr;
+            logger.info(`QR code generated — open http://YOUR_SERVER:${QR_PORT} to scan`);
         }
 
         if (connection === 'open') {
+            currentQR = null;
+            connectionStatus = 'connected';
             logger.info('Connected to WhatsApp successfully');
         }
 

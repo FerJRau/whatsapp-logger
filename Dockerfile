@@ -20,6 +20,9 @@ RUN mkdir -p /app/auth_store /app/data
 ENV AUTH_DIR=/app/auth_store
 ENV SQLITE_PATH=/app/data/messages.db
 ENV LOG_LEVEL=info
+ENV QR_PORT=3000
+
+EXPOSE 3000
 
 # Run as non-root
 RUN useradd -m appuser && chown -R appuser:appuser /app
