@@ -3,6 +3,7 @@ const { createClient } = require('@supabase/supabase-js');
 const Database = require('better-sqlite3');
 const pino = require('pino');
 const path = require('path');
+const WebSocket = require('ws');
 require('dotenv').config();
 
 // --- Configuration ---
@@ -18,7 +19,9 @@ const logger = pino({ level: LOG_LEVEL });
 // --- Supabase client (optional) ---
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
-    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+        realtime: { transport: WebSocket }
+    });
     logger.info('Supabase configured — messages will be logged to cloud DB');
 } else {
     logger.info('No Supabase credentials — using local SQLite only');
