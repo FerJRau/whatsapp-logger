@@ -50,158 +50,306 @@ Chatwoot agent reply ──▶ AWF11b (Reply Bridge) ──▶ WaSender API ─�
 - **Chatwoot API:** `https://app.chatwoot.com/api/v1/accounts/153401/...`
 - **Deduplication:** `ChatwootMirrorDedupe` DataTable (key: `wa:{clinic}:{messageId}`)
 - **Bot tracking:** `BotSentMessages` DataTable
-- **Multi-clinic:** Polanco (primary), Insurgentes, Toluca — identified by Chatwoot inbox IDs
+- **Multi-clinic:** Polanco (inbox 97516), Insurgentes (inbox 104052), Toluca (inbox 103961)
 - **Reply Bridge mode:** Currently `MONITOR_ONLY` — clinics reply via WhatsApp Web, not Chatwoot
 
 ---
 
-## Audit Components
+## Setup: Two-Table Logging for Easy Diff
 
-### 1. Baileys Logger (Ground Truth)
+Both tables live in the same Supabase project so you can JOIN them with a single query.
 
-**What:** Independent WhatsApp Web connection that logs every message to Supabase.  
-**Where:** Easypanel service `whatsapp-logger` on your VPS (31.220.21.45).  
-**Database:** Supabase project `ptssrzqlshqxowofecct` → table `whatsapp_messages`.
+### Table 1: `whatsapp_messages` (Baileys — Ground Truth)
 
-This captures messages **directly from WhatsApp servers**, completely bypassing WaSender, n8n, and Chatwoot. If a message exists here but not in Chatwoot, it was lost somewhere in the chain.
+Already created. Captures messages directly from WhatsApp servers via Baileys linked device.
 
-### 2. Chatwoot (Final Destination)
+### Table 2: `n8n_message_log` (n8n — WaSender path)
 
-**What:** All conversations visible to agents.  
-**API:** `https://app.chatwoot.com/api/v1/accounts/153401/`  
-**Written by:** AWF-MIRROR (via GW3B dispatch).
+Captures every message that WaSender successfully delivers to your n8n gateway.
 
-### 3. n8n Execution Log (Optional — Phase 2)
-
-Add a Supabase INSERT as the first node after GW3B receives the WaSender webhook. This tells you if n8n received the message at all.
-
----
-
-## How to Perform the Audit
-
-### Phase 1: Collect Data (Passive — runs automatically)
-
-Once the Baileys logger is connected (QR scanned), it silently records every message.  
-Let it run for **at least 48-72 hours** during normal business hours to capture a meaningful sample.
-
-No action needed — just verify it's running:
-- Easypanel dashboard: service should show green
-- Supabase table: `SELECT COUNT(*) FROM whatsapp_messages` should grow
-
-### Phase 2: Compare Baileys vs Chatwoot
-
-After 48-72 hours, run this comparison.
-
-#### Step 1: Export Baileys messages for a time window
+#### Step A: Create the table in Supabase
 
 Go to **https://supabase.com/dashboard/project/ptssrzqlshqxowofecct/sql/new** and run:
 
 ```sql
--- All inbound messages in the last 72 hours
-SELECT 
-    message_id,
-    sender_phone,
-    timestamp,
-    message_type,
-    LEFT(body, 100) AS body_preview,
-    from_jid
-FROM whatsapp_messages 
-WHERE timestamp > NOW() - INTERVAL '72 hours'
-ORDER BY timestamp ASC;
-```
-
-Note the total count:
-```sql
-SELECT COUNT(*) AS total_messages 
-FROM whatsapp_messages 
-WHERE timestamp > NOW() - INTERVAL '72 hours';
-```
-
-#### Step 2: Cross-reference with Chatwoot
-
-For each unique `sender_phone` in the Baileys log, check if Chatwoot has a corresponding conversation with the same messages.
-
-**Via Chatwoot API:**
-```bash
-# Search for a contact by phone number
-curl -s "https://app.chatwoot.com/api/v1/accounts/153401/search?q=5215512345678" \
-  -H "api_access_token: YOUR_CHATWOOT_TOKEN" | jq .
-```
-
-**Via Chatwoot UI:**
-1. Open Chatwoot → search the phone number
-2. Open the conversation → compare message timestamps
-
-#### Step 3: Identify gaps
-
-```sql
--- Messages grouped by hour (to spot time-based patterns)
-SELECT 
-    DATE_TRUNC('hour', timestamp) AS hour,
-    COUNT(*) AS message_count
-FROM whatsapp_messages 
-WHERE timestamp > NOW() - INTERVAL '72 hours'
-GROUP BY hour
-ORDER BY hour;
-```
-
-Look for:
-- Hours where Baileys logged messages but Chatwoot shows none → messages lost
-- Specific sender_phone numbers with messages in Baileys but missing in Chatwoot
-- Time gaps that correlate with VPS restarts, network issues, or WaSender downtime
-
-### Phase 3: Pinpoint the Failure Layer
-
-Once you've identified lost messages, determine WHERE they were lost:
-
-| Scenario | Meaning | Evidence |
-|----------|---------|----------|
-| Message in Baileys, NOT in Chatwoot | Lost between WhatsApp → Chatwoot | WaSender or n8n dropped it |
-| Message in Baileys, in Chatwoot but delayed | Slow processing, not a loss | Check timestamps |
-| Message NOT in Baileys, NOT in Chatwoot | WhatsApp-level issue (very rare) | Device was offline |
-
-**To narrow down WaSender vs n8n:**
-
-Add a logging node in GW3B (your gateway workflow) as the **very first step** after the webhook trigger:
-
-```javascript
-// Add this as a Code node right after the WaSender webhook trigger in GW3B
-// It logs to Supabase that n8n received the webhook
-const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(
-    'https://ptssrzqlshqxowofecct.supabase.co',
-    'YOUR_SERVICE_KEY'
+-- n8n message log: records every message WaSender delivers to GW3B
+CREATE TABLE IF NOT EXISTS n8n_message_log (
+    id BIGSERIAL PRIMARY KEY,
+    message_id TEXT,
+    sender_phone TEXT,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    message_type TEXT,
+    body TEXT,
+    clinic TEXT DEFAULT 'Polanco',
+    from_me BOOLEAN DEFAULT FALSE,
+    direction TEXT DEFAULT 'inbound',
+    workflow TEXT DEFAULT 'GW3B',
+    execution_id TEXT,
+    raw_payload JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-await supabase.from('n8n_webhook_log').insert({
-    message_id: $json.body?.messageId || 'unknown',
-    phone: $json.body?.phone || 'unknown',
-    received_at: new Date().toISOString(),
-    raw_payload: JSON.stringify($json)
-});
+-- Indexes for fast diff queries
+CREATE INDEX idx_n8n_log_message_id ON n8n_message_log(message_id);
+CREATE INDEX idx_n8n_log_timestamp ON n8n_message_log(timestamp);
+CREATE INDEX idx_n8n_log_sender ON n8n_message_log(sender_phone);
+
+-- RLS: only service role can read/write
+ALTER TABLE n8n_message_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON n8n_message_log
+    FOR ALL
+    USING (auth.role() = 'service_role')
+    WITH CHECK (auth.role() = 'service_role');
+```
+
+#### Step B: Add logging node in GW3B
+
+Open your GW3B workflow in n8n. Add a **Code node** called `Log to Supabase` as the **very first step** after the WaSender webhook trigger, BEFORE any other processing.
+
+Wire it like this:
+```
+WaSender Webhook → Log to Supabase → (rest of your existing GW3B flow)
+```
+
+**Important:** The log node must pass data through unchanged — it only observes, never modifies.
+
+Paste this code in the Code node:
+
+```javascript
+// GW3B Audit Logger — logs every incoming WaSender webhook to Supabase
+// This node is pass-through: it logs and forwards the data unchanged.
+
+const SUPABASE_URL = 'https://ptssrzqlshqxowofecct.supabase.co';
+const SUPABASE_KEY = 'YOUR_SERVICE_KEY_HERE';  // Replace with your service_role key
+
+const items = $input.all();
+const raw = items[0]?.json || {};
+const body = raw.body && typeof raw.body === 'object' ? raw.body : raw;
+
+const phone = String(body.phone || body.rawPhone || '').replace(/\D/g, '');
+const messageId = String(body.messageId || body.sourceMessageId || '').trim();
+const messageType = String(body.messageType || 'text').trim().toLowerCase();
+const content = String(body.content || body.message || body.text || '').trim();
+const clinic = String(body.clinic || '').trim() || 'Polanco';
+const fromMe = body.fromMe === true || String(body.fromMe || '') === 'true';
+
+const row = {
+    message_id: messageId || null,
+    sender_phone: phone || null,
+    message_type: messageType,
+    body: content.substring(0, 500) || null,
+    clinic: clinic,
+    from_me: fromMe,
+    direction: fromMe ? 'outbound' : 'inbound',
+    workflow: 'GW3B',
+    execution_id: $execution.id,
+    raw_payload: body,
+};
+
+// Fire-and-forget HTTP call to Supabase REST API
+try {
+    await fetch(`${SUPABASE_URL}/rest/v1/n8n_message_log`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+            'Prefer': 'return=minimal',
+        },
+        body: JSON.stringify(row),
+    });
+} catch (e) {
+    // Silently ignore logging errors — never block message processing
+}
+
+// Pass through all items unchanged
+return items;
+```
+
+> **Replace `YOUR_SERVICE_KEY_HERE`** with your Supabase service_role key.  
+> The node uses the Supabase REST API directly (no extra npm packages needed).  
+> Errors are caught silently — logging never blocks your message flow.
+
+#### Step C: (Optional) Also log in AWF-MIRROR
+
+For even more granularity, add the same pattern in AWF-MIRROR right after `Normalize Input`. This tells you if GW3B successfully dispatched to MIRROR:
+
+```javascript
+// AWF-MIRROR Audit Logger — confirms mirror received the message
+const SUPABASE_URL = 'https://ptssrzqlshqxowofecct.supabase.co';
+const SUPABASE_KEY = 'YOUR_SERVICE_KEY_HERE';
+
+const normalized = $input.first().json || {};
+
+try {
+    await fetch(`${SUPABASE_URL}/rest/v1/n8n_message_log`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+            'Prefer': 'return=minimal',
+        },
+        body: JSON.stringify({
+            message_id: normalized.messageId || null,
+            sender_phone: normalized.phone || null,
+            message_type: normalized.messageType || 'unknown',
+            body: (normalized.content || '').substring(0, 500) || null,
+            clinic: normalized.clinic || 'Polanco',
+            from_me: normalized.fromMe || false,
+            direction: normalized.fromMe ? 'outbound' : 'inbound',
+            workflow: 'AWF-MIRROR',
+            execution_id: $execution.id,
+            raw_payload: normalized,
+        }),
+    });
+} catch (e) {}
 
 return $input.all();
 ```
 
-Then create the table:
+---
+
+## Running the Diff
+
+After both loggers have been running for 24-72 hours, go to **https://supabase.com/dashboard/project/ptssrzqlshqxowofecct/sql/new** and run these queries.
+
+### Query 1: Summary — How many messages did each system capture?
+
 ```sql
-CREATE TABLE n8n_webhook_log (
-    id BIGSERIAL PRIMARY KEY,
-    message_id TEXT,
-    phone TEXT,
-    received_at TIMESTAMPTZ,
-    raw_payload JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+SELECT 
+    'Baileys (ground truth)' AS source,
+    COUNT(*) AS total_messages
+FROM whatsapp_messages 
+WHERE timestamp > NOW() - INTERVAL '72 hours'
+
+UNION ALL
+
+SELECT 
+    'n8n (WaSender→GW3B)' AS source,
+    COUNT(*) AS total_messages
+FROM n8n_message_log 
+WHERE timestamp > NOW() - INTERVAL '72 hours';
 ```
 
-Now you can compare three layers:
-```
-Baileys (ground truth) → n8n_webhook_log (WaSender delivered?) → Chatwoot (fully processed?)
+If the Baileys count is higher than n8n → messages are being lost before n8n.
+
+### Query 2: Messages Baileys captured but n8n did NOT (= Lost Messages)
+
+```sql
+-- LOST MESSAGES: Baileys saw them, WaSender/n8n did not
+SELECT 
+    b.message_id,
+    b.sender_phone,
+    b.timestamp,
+    b.message_type,
+    LEFT(b.body, 80) AS body_preview
+FROM whatsapp_messages b
+LEFT JOIN n8n_message_log n 
+    ON b.sender_phone = n.sender_phone 
+    AND b.timestamp BETWEEN n.timestamp - INTERVAL '2 minutes' 
+                        AND n.timestamp + INTERVAL '2 minutes'
+WHERE n.id IS NULL
+    AND b.timestamp > NOW() - INTERVAL '72 hours'
+ORDER BY b.timestamp DESC;
 ```
 
-- In Baileys but NOT in n8n_webhook_log → **WaSender dropped the webhook**
-- In n8n_webhook_log but NOT in Chatwoot → **n8n/AWF-MIRROR failed to write to Chatwoot**
+> **Why fuzzy timestamp match?** Baileys and WaSender may record slightly different timestamps for the same message. The 2-minute window accounts for this.
+
+### Query 3: Messages n8n received but Baileys did NOT (should be rare)
+
+```sql
+-- Messages WaSender delivered to n8n but Baileys missed
+-- (would indicate Baileys logger was disconnected)
+SELECT 
+    n.message_id,
+    n.sender_phone,
+    n.timestamp,
+    n.message_type,
+    LEFT(n.body, 80) AS body_preview
+FROM n8n_message_log n
+LEFT JOIN whatsapp_messages b 
+    ON n.sender_phone = b.sender_phone 
+    AND n.timestamp BETWEEN b.timestamp - INTERVAL '2 minutes' 
+                        AND b.timestamp + INTERVAL '2 minutes'
+WHERE b.id IS NULL
+    AND n.timestamp > NOW() - INTERVAL '72 hours'
+    AND n.workflow = 'GW3B'
+ORDER BY n.timestamp DESC;
+```
+
+### Query 4: Hourly comparison — spot patterns
+
+```sql
+-- Side-by-side hourly counts to spot drop patterns
+SELECT 
+    COALESCE(bh.hour, nh.hour) AS hour,
+    COALESCE(bh.baileys_count, 0) AS baileys_count,
+    COALESCE(nh.n8n_count, 0) AS n8n_count,
+    COALESCE(bh.baileys_count, 0) - COALESCE(nh.n8n_count, 0) AS diff
+FROM (
+    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS baileys_count
+    FROM whatsapp_messages
+    WHERE timestamp > NOW() - INTERVAL '72 hours'
+    GROUP BY hour
+) bh
+FULL OUTER JOIN (
+    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS n8n_count
+    FROM n8n_message_log
+    WHERE timestamp > NOW() - INTERVAL '72 hours'
+        AND workflow = 'GW3B'
+    GROUP BY hour
+) nh ON bh.hour = nh.hour
+ORDER BY hour;
+```
+
+A positive `diff` means Baileys saw more messages than n8n → those were dropped by WaSender.
+
+### Query 5: Per-clinic breakdown
+
+```sql
+SELECT 
+    n.clinic,
+    COUNT(DISTINCT n.sender_phone) AS unique_senders,
+    COUNT(*) AS n8n_messages,
+    (SELECT COUNT(*) FROM whatsapp_messages b 
+     WHERE b.timestamp > NOW() - INTERVAL '72 hours') AS baileys_total
+FROM n8n_message_log n
+WHERE n.timestamp > NOW() - INTERVAL '72 hours'
+GROUP BY n.clinic
+ORDER BY n8n_messages DESC;
+```
+
+### Query 6: If you also log in AWF-MIRROR — pinpoint GW3B→MIRROR drops
+
+```sql
+-- Messages GW3B received but MIRROR never got (= GW3B dispatch failure)
+SELECT 
+    gw.message_id,
+    gw.sender_phone,
+    gw.timestamp,
+    gw.clinic
+FROM n8n_message_log gw
+LEFT JOIN n8n_message_log mir 
+    ON gw.message_id = mir.message_id 
+    AND mir.workflow = 'AWF-MIRROR'
+WHERE gw.workflow = 'GW3B'
+    AND mir.id IS NULL
+    AND gw.timestamp > NOW() - INTERVAL '72 hours'
+ORDER BY gw.timestamp DESC;
+```
+
+---
+
+## Interpreting Results
+
+| Baileys | n8n (GW3B) | n8n (MIRROR) | Chatwoot | Diagnosis |
+|---------|------------|--------------|----------|-----------|
+| Yes | No | No | No | **WaSender dropped the webhook** — message never reached n8n |
+| Yes | Yes | No | No | **GW3B failed to dispatch to MIRROR** — check execution errors |
+| Yes | Yes | Yes | No | **MIRROR→Chatwoot write failed** — Chatwoot API error or dedup false positive |
+| Yes | Yes | Yes | Yes | Message delivered successfully |
+| No | Yes | Yes | Yes | **Baileys logger was disconnected** — check Easypanel service status |
 
 ---
 
@@ -218,7 +366,7 @@ Baileys (ground truth) → n8n_webhook_log (WaSender delivered?) → Chatwoot (f
 ### Stopping the Logger
 
 1. Go to Easypanel: `http://31.220.21.45:3000/projects/whatsapp-logger/app/whatsapp-logger`
-2. Click the **stop icon** (square ⏹) in the toolbar next to the Deploy button
+2. Click the **stop icon** (square) in the toolbar next to the Deploy button
 3. The service will stop. Data in Supabase is preserved.
 
 ### Re-scanning QR (if session expires)
@@ -238,19 +386,29 @@ The `auth_store` volume persists the session, so normal container restarts do NO
 ### Checking Logger Health
 
 ```sql
--- Most recent message logged
-SELECT timestamp, sender_phone, message_type, LEFT(body, 50) 
-FROM whatsapp_messages 
-ORDER BY timestamp DESC 
-LIMIT 1;
+-- Most recent message logged (both sources)
+SELECT 'Baileys' AS source, timestamp, sender_phone, message_type
+FROM whatsapp_messages ORDER BY timestamp DESC LIMIT 1
+UNION ALL
+SELECT 'n8n' AS source, timestamp, sender_phone, message_type
+FROM n8n_message_log ORDER BY timestamp DESC LIMIT 1;
 
--- Messages per day for the last week
+-- Messages per day for the last week (both sources)
 SELECT 
-    DATE(timestamp) AS day,
-    COUNT(*) AS messages
-FROM whatsapp_messages 
-WHERE timestamp > NOW() - INTERVAL '7 days'
-GROUP BY day
+    DATE(b.day) AS day,
+    COALESCE(b.baileys, 0) AS baileys,
+    COALESCE(n.n8n, 0) AS n8n,
+    COALESCE(b.baileys, 0) - COALESCE(n.n8n, 0) AS diff
+FROM (
+    SELECT DATE(timestamp) AS day, COUNT(*) AS baileys
+    FROM whatsapp_messages WHERE timestamp > NOW() - INTERVAL '7 days'
+    GROUP BY DATE(timestamp)
+) b
+FULL OUTER JOIN (
+    SELECT DATE(timestamp) AS day, COUNT(*) AS n8n
+    FROM n8n_message_log WHERE timestamp > NOW() - INTERVAL '7 days'
+    GROUP BY DATE(timestamp)
+) n ON b.day = n.day
 ORDER BY day;
 ```
 
@@ -270,7 +428,6 @@ If the most recent message is hours old during business hours, the logger may ha
 | Supabase SQL Editor | `https://supabase.com/dashboard/project/ptssrzqlshqxowofecct/sql/new` |
 | GitHub Repo | `https://github.com/FerJRau/whatsapp-logger` (private) |
 | Chatwoot | `https://app.chatwoot.com` |
-| WaSender API Docs | `https://wasenderapi.com` |
 
 ---
 
@@ -278,8 +435,10 @@ If the most recent message is hours old during business hours, the logger may ha
 
 After running the audit for 72+ hours:
 
-1. **If no messages are lost:** WaSender + n8n + Chatwoot chain is reliable. The original problem may have been transient (network blip, VPS restart, etc.). Keep the logger running as a safety net.
+1. **If counts match (diff ≈ 0):** WaSender + n8n + Chatwoot chain is reliable. Losses may have been transient. Keep the logger running as a safety net.
 
-2. **If messages ARE lost (Baileys has them, Chatwoot doesn't):** You've confirmed the problem and can quantify it (X messages lost per day). Proceed to Phase 3 to pinpoint whether WaSender or n8n is the culprit.
+2. **If Baileys > n8n (positive diff):** WaSender is dropping webhooks. Quantify it (X messages lost per day). Consider migrating to the official WhatsApp Cloud API.
 
-3. **If many messages are lost:** Consider migrating from WaSender to the **official WhatsApp Cloud API** (via Meta), which has proper webhook retry logic, delivery receipts, and SLA guarantees. The Baileys logger can serve as the bridge during migration.
+3. **If n8n > Baileys (negative diff):** Baileys logger was probably disconnected for a period. Check the logger health queries and Easypanel uptime.
+
+4. **If both captured the same messages but Chatwoot is missing some:** The problem is in AWF-MIRROR's Chatwoot write logic — check for dedup false positives, Chatwoot API rate limits, or contact/conversation creation failures.
