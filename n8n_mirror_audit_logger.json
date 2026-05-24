@@ -1,5 +1,5 @@
 {
-  "name": "AUDIT — MIRROR Checkpoints (copy nodes into AWF-MIRROR)",
+  "name": "AUDIT — MIRROR Checkpoints (copy 3 nodes into AWF-MIRROR)",
   "nodes": [
     {
       "parameters": {},
@@ -12,14 +12,16 @@
     {
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={{ JSON.stringify({ valid: true, invalidReason: '', rawPhone: '5215559999999', phone: '5215559999999', pushName: 'Test Patient', content: 'Hola quiero agendar una cita', messageType: 'text', messageId: 'TEST-MIRROR-001', sourceMessageId: 'TEST-MIRROR-001', mirrorKey: 'mirror:Polanco:TEST-MIRROR-001', clinic: 'Polanco', chatwootInboxId: 27, fromMe: false, imageUrl: '', mediaUrl: '', mimetype: '', mirrorSourceSeed: '', wasenderMsgId: '', wasenderMirrorKey: '' }) }}",
+        "jsonOutput": "={{ JSON.stringify({ valid: true, invalidReason: '', rawPhone: '5215559999999', phone: '5215559999999', pushName: 'Test Patient', content: 'Hola quiero agendar una cita', messageType: 'text', messageId: 'TEST-MIRROR-001', sourceMessageId: 'TEST-MIRROR-001', mirrorKey: 'mirror:Polanco:TEST-MIRROR-001', clinic: 'Polanco', chatwootInboxId: 27, fromMe: false }) }}",
         "options": {}
       },
       "id": "m001-0002-4000-8000-000000000002",
-      "name": "Sample Normalize Output",
+      "name": "Normalize Input",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [240, 300]
+      "position": [240, 300],
+      "notesInFlow": true,
+      "notes": "TEST ONLY — simulates Normalize Input output.\nDelete this node when done testing."
     },
     {
       "parameters": {
@@ -60,7 +62,7 @@
       "typeVersion": 4.2,
       "position": [540, 300],
       "notesInFlow": true,
-      "notes": "Side-branch from Normalize Input.\nDo NOT connect output to anything.\nWire: Normalize Input → (second output) → this node."
+      "notes": "COPY INTO AWF-MIRROR.\nWire: Normalize Input → this node (2nd output).\nLeave output disconnected (dead end)."
     },
     {
       "parameters": {
@@ -72,7 +74,9 @@
       "name": "Sample CW Send Result",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [240, 560]
+      "position": [240, 560],
+      "notesInFlow": true,
+      "notes": "TEST ONLY — simulates Chatwoot API response.\nDelete this node when done testing."
     },
     {
       "parameters": {
@@ -97,7 +101,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ message_id: $('Sample Normalize Output').first().json.messageId || null, sender_phone: String($('Sample Normalize Output').first().json.phone || '').replace(/\\D/g, '') || null, message_type: $('Sample Normalize Output').first().json.messageType || 'unknown', body: String($('Sample Normalize Output').first().json.content || '').substring(0, 500) || null, clinic: $('Sample Normalize Output').first().json.clinic || 'Polanco', from_me: $('Sample Normalize Output').first().json.fromMe === true, direction: $('Sample Normalize Output').first().json.fromMe ? 'outbound' : 'inbound', workflow: 'MIRROR-SENT', execution_id: $execution.id, status: $json.id ? 'sent_ok' : 'send_failed', skip_reason: $json.id ? null : ($json.message || 'chatwoot_api_error'), mirror_key: $('Sample Normalize Output').first().json.mirrorKey || null, chatwoot_message_id: String($json.id || ''), conversation_id: String($json.conversation_id || '') }) }}",
+        "jsonBody": "={{ JSON.stringify({ message_id: $('Normalize Input').first().json.messageId || null, sender_phone: String($('Normalize Input').first().json.phone || '').replace(/\\D/g, '') || null, message_type: $('Normalize Input').first().json.messageType || 'unknown', body: String($('Normalize Input').first().json.content || '').substring(0, 500) || null, clinic: $('Normalize Input').first().json.clinic || 'Polanco', from_me: $('Normalize Input').first().json.fromMe === true, direction: $('Normalize Input').first().json.fromMe ? 'outbound' : 'inbound', workflow: 'MIRROR-SENT', execution_id: $execution.id, status: $json.id ? 'sent_ok' : 'send_failed', skip_reason: $json.id ? null : ($json.message || 'chatwoot_api_error'), mirror_key: $('Normalize Input').first().json.mirrorKey || null, chatwoot_message_id: String($json.id || ''), conversation_id: String($json.conversation_id || '') }) }}",
         "options": {
           "response": {
             "response": {
@@ -113,7 +117,7 @@
       "typeVersion": 4.2,
       "position": [540, 560],
       "notesInFlow": true,
-      "notes": "Side-branch from Send Chatwoot Message AND Send Chatwoot Attachment.\nDo NOT connect output to anything."
+      "notes": "COPY INTO AWF-MIRROR.\nWire from: Send Chatwoot Message → this (2nd output).\nAlso: Send Chatwoot Attachment → this.\nLeave output disconnected (dead end)."
     },
     {
       "parameters": {
@@ -125,7 +129,9 @@
       "name": "Sample Exit Result",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [240, 820]
+      "position": [240, 820],
+      "notesInFlow": true,
+      "notes": "TEST ONLY — simulates a Return node output.\nDelete this node when done testing."
     },
     {
       "parameters": {
@@ -150,7 +156,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ message_id: ($('Sample Normalize Output').first().json.messageId || null), sender_phone: String($('Sample Normalize Output').first().json.phone || '').replace(/\\D/g, '') || null, message_type: ($('Sample Normalize Output').first().json.messageType || 'unknown'), body: null, clinic: ($('Sample Normalize Output').first().json.clinic || 'Polanco'), from_me: ($('Sample Normalize Output').first().json.fromMe === true), direction: ($('Sample Normalize Output').first().json.fromMe ? 'outbound' : 'inbound'), workflow: 'MIRROR-EXIT', execution_id: $execution.id, status: $json.status || 'unknown', skip_reason: $json.reason || null, mirror_key: $json.mirrorKey || ($('Sample Normalize Output').first().json.mirrorKey || null) }) }}",
+        "jsonBody": "={{ JSON.stringify({ message_id: $('Normalize Input').first().json.messageId || null, sender_phone: String($('Normalize Input').first().json.phone || '').replace(/\\D/g, '') || null, message_type: $('Normalize Input').first().json.messageType || 'unknown', body: null, clinic: $('Normalize Input').first().json.clinic || 'Polanco', from_me: $('Normalize Input').first().json.fromMe === true, direction: $('Normalize Input').first().json.fromMe ? 'outbound' : 'inbound', workflow: 'MIRROR-EXIT', execution_id: $execution.id, status: $json.status || 'unknown', skip_reason: $json.reason || null, mirror_key: $json.mirrorKey || $('Normalize Input').first().json.mirrorKey || null }) }}",
         "options": {
           "response": {
             "response": {
@@ -166,7 +172,7 @@
       "typeVersion": 4.2,
       "position": [540, 820],
       "notesInFlow": true,
-      "notes": "Connect from ALL exit nodes:\n- Return Deduped\n- Return Invalid\n- Return Self Guard Skip\n- Return Result"
+      "notes": "COPY INTO AWF-MIRROR.\nWire from ALL exit nodes:\n- Return Deduped (both)\n- Return Invalid\n- Return Self Guard Skip\n- Return Result\nLeave output disconnected (dead end)."
     }
   ],
   "connections": {
@@ -174,14 +180,14 @@
       "main": [
         [
           {
-            "node": "Sample Normalize Output",
+            "node": "Normalize Input",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Sample Normalize Output": {
+    "Normalize Input": {
       "main": [
         [
           {
