@@ -1,0 +1,237 @@
+{
+  "name": "AUDIT — MIRROR Checkpoints (copy nodes into AWF-MIRROR)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "m001-0001-4000-8000-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ valid: true, invalidReason: '', rawPhone: '5215559999999', phone: '5215559999999', pushName: 'Test Patient', content: 'Hola quiero agendar una cita', messageType: 'text', messageId: 'TEST-MIRROR-001', sourceMessageId: 'TEST-MIRROR-001', mirrorKey: 'mirror:Polanco:TEST-MIRROR-001', clinic: 'Polanco', chatwootInboxId: 27, fromMe: false, imageUrl: '', mediaUrl: '', mimetype: '', mirrorSourceSeed: '', wasenderMsgId: '', wasenderMirrorKey: '' }) }}",
+        "options": {}
+      },
+      "id": "m001-0002-4000-8000-000000000002",
+      "name": "Sample Normalize Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ptssrzqlshqxowofecct.supabase.co/rest/v1/n8n_message_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "YOUR_SERVICE_KEY_HERE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_SERVICE_KEY_HERE"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: $json.messageId || $json.sourceMessageId || null, sender_phone: String($json.phone || $json.rawPhone || '').replace(/\\D/g, '') || null, message_type: $json.messageType || 'unknown', body: String($json.content || '').substring(0, 500) || null, clinic: $json.clinic || 'Polanco', from_me: $json.fromMe === true, direction: $json.fromMe ? 'outbound' : 'inbound', workflow: 'MIRROR-ENTRY', execution_id: $execution.id, status: $json.valid ? 'valid' : 'invalid', skip_reason: $json.invalidReason || null, mirror_key: $json.mirrorKey || null }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "m001-0003-4000-8000-000000000003",
+      "name": "Log MIRROR Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, 300],
+      "notesInFlow": true,
+      "notes": "Side-branch from Normalize Input.\nDo NOT connect output to anything.\nWire: Normalize Input → (second output) → this node."
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ id: 123456, conversation_id: 789, content: 'Hola quiero agendar una cita', message_type: 0, account_id: 153401 }) }}",
+        "options": {}
+      },
+      "id": "m001-0004-4000-8000-000000000004",
+      "name": "Sample CW Send Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 560]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ptssrzqlshqxowofecct.supabase.co/rest/v1/n8n_message_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "YOUR_SERVICE_KEY_HERE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_SERVICE_KEY_HERE"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: $('Sample Normalize Output').first().json.messageId || null, sender_phone: String($('Sample Normalize Output').first().json.phone || '').replace(/\\D/g, '') || null, message_type: $('Sample Normalize Output').first().json.messageType || 'unknown', body: String($('Sample Normalize Output').first().json.content || '').substring(0, 500) || null, clinic: $('Sample Normalize Output').first().json.clinic || 'Polanco', from_me: $('Sample Normalize Output').first().json.fromMe === true, direction: $('Sample Normalize Output').first().json.fromMe ? 'outbound' : 'inbound', workflow: 'MIRROR-SENT', execution_id: $execution.id, status: $json.id ? 'sent_ok' : 'send_failed', skip_reason: $json.id ? null : ($json.message || 'chatwoot_api_error'), mirror_key: $('Sample Normalize Output').first().json.mirrorKey || null, chatwoot_message_id: String($json.id || ''), conversation_id: String($json.conversation_id || '') }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "m001-0005-4000-8000-000000000005",
+      "name": "Log MIRROR Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, 560],
+      "notesInFlow": true,
+      "notes": "Side-branch from Send Chatwoot Message AND Send Chatwoot Attachment.\nDo NOT connect output to anything."
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ success: true, status: 'deduped', reason: 'mirror_key_already_claimed', mirrorKey: 'mirror:Polanco:TEST-MIRROR-001' }) }}",
+        "options": {}
+      },
+      "id": "m001-0006-4000-8000-000000000006",
+      "name": "Sample Exit Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 820]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://ptssrzqlshqxowofecct.supabase.co/rest/v1/n8n_message_log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "YOUR_SERVICE_KEY_HERE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_SERVICE_KEY_HERE"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: ($('Sample Normalize Output').first().json.messageId || null), sender_phone: String($('Sample Normalize Output').first().json.phone || '').replace(/\\D/g, '') || null, message_type: ($('Sample Normalize Output').first().json.messageType || 'unknown'), body: null, clinic: ($('Sample Normalize Output').first().json.clinic || 'Polanco'), from_me: ($('Sample Normalize Output').first().json.fromMe === true), direction: ($('Sample Normalize Output').first().json.fromMe ? 'outbound' : 'inbound'), workflow: 'MIRROR-EXIT', execution_id: $execution.id, status: $json.status || 'unknown', skip_reason: $json.reason || null, mirror_key: $json.mirrorKey || ($('Sample Normalize Output').first().json.mirrorKey || null) }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "m001-0007-4000-8000-000000000007",
+      "name": "Log MIRROR Exit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, 820],
+      "notesInFlow": true,
+      "notes": "Connect from ALL exit nodes:\n- Return Deduped\n- Return Invalid\n- Return Self Guard Skip\n- Return Result"
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Sample Normalize Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample Normalize Output": {
+      "main": [
+        [
+          {
+            "node": "Log MIRROR Entry",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sample CW Send Result",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sample Exit Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample CW Send Result": {
+      "main": [
+        [
+          {
+            "node": "Log MIRROR Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample Exit Result": {
+      "main": [
+        [
+          {
+            "node": "Log MIRROR Exit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "mirror-audit"
+  },
+  "tags": []
+}

@@ -431,6 +431,193 @@ If the most recent message is hours old during business hours, the logger may ha
 
 ---
 
+## Phase 1 Results (WaSender → n8n)
+
+Audit period: May 20–24 (~3.3 days). **WaSender is NOT dropping patient messages.**
+
+- 172 raw gap — but 170 are `protocolMessage` (WhatsApp internal signals, no content)
+- Only 2 actual messages missing: both outbound bot consent reminders, not patient messages
+- **0 inbound patient messages were lost**
+
+**Conclusion:** If Chatwoot is missing messages, the problem is downstream of GW3B — in AWF-MIRROR.
+
+---
+
+## Phase 2: AWF-MIRROR Audit (MIRROR → Chatwoot)
+
+Since WaSender→GW3B is clean, we now add three checkpoints inside AWF-MIRROR to catch exactly where messages are dropped:
+
+```
+GW3B ──▶ [MIRROR-ENTRY] ──▶ Normalize Input ──▶ Input Valid?
+                                                    │
+                  ┌──────── Return Invalid ◄────── No (MIRROR-EXIT: status=skipped)
+                  │
+                  │ Yes
+                  │
+                  ▼
+              Get Dedupe Row ──▶ Already Mirrored? ──▶ Return Deduped (MIRROR-EXIT: status=deduped)
+                                        │
+                                       No
+                                        ▼
+                                  ... Contact + Conversation logic ...
+                                        │
+                                        ▼
+                              Send Chatwoot Message ──▶ [MIRROR-SENT] ──▶ Return Result
+```
+
+### Step 1: Add columns to n8n_message_log
+
+Run this SQL in Supabase SQL Editor:
+
+```sql
+ALTER TABLE n8n_message_log ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'received';
+ALTER TABLE n8n_message_log ADD COLUMN IF NOT EXISTS skip_reason TEXT;
+ALTER TABLE n8n_message_log ADD COLUMN IF NOT EXISTS mirror_key TEXT;
+ALTER TABLE n8n_message_log ADD COLUMN IF NOT EXISTS chatwoot_message_id TEXT;
+ALTER TABLE n8n_message_log ADD COLUMN IF NOT EXISTS conversation_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_n8n_log_workflow ON n8n_message_log(workflow);
+CREATE INDEX IF NOT EXISTS idx_n8n_log_status ON n8n_message_log(status);
+```
+
+### Step 2: Import the test workflow
+
+Import `n8n_mirror_audit_logger.json` into n8n (Add workflow → Import from file).
+
+The workflow contains 3 logging nodes you'll copy into AWF-MIRROR:
+
+| Node | Where to place in AWF-MIRROR | Workflow tag |
+|------|------------------------------|--------------|
+| **Log MIRROR Entry** | Side-branch from `Normalize Input` output | `MIRROR-ENTRY` |
+| **Log MIRROR Sent** | Side-branch from `Send Chatwoot Message` AND `Send Chatwoot Attachment` | `MIRROR-SENT` |
+| **Log MIRROR Exit** | Connected from `Return Invalid`, `Return Deduped`, `Return Self Guard Skip`, `Return Result` | `MIRROR-EXIT` |
+
+### Step 3: Test the imported workflow
+
+1. Open the imported workflow
+2. Replace `YOUR_SERVICE_KEY_HERE` in ALL 3 logging nodes (6 total header values — `apikey` and `Authorization` in each)
+3. Click "Test workflow" → check `n8n_message_log` table for 3 new rows:
+   - One with `workflow = 'MIRROR-ENTRY'`
+   - One with `workflow = 'MIRROR-SENT'`
+   - One with `workflow = 'MIRROR-EXIT'`
+
+### Step 4: Copy nodes into AWF-MIRROR
+
+**Node 1: Log MIRROR Entry**
+- Copy the `Log MIRROR Entry` node from the test workflow
+- Paste into AWF-MIRROR
+- Wire: `Normalize Input` → `Log MIRROR Entry` (as a SECOND output, keep the existing connection to `Input Valid?`)
+- Do NOT connect Log MIRROR Entry's output to anything (dead end)
+- **IMPORTANT:** The JSON body expression uses `$json.messageId`, `$json.phone`, etc. which match Normalize Input's output exactly
+
+**Node 2: Log MIRROR Sent**
+- Copy the `Log MIRROR Sent` node
+- Paste into AWF-MIRROR
+- Wire: `Send Chatwoot Message` → `Log MIRROR Sent` (second output, keep existing connection to `Should Auto-Resolve?`)
+- Also wire: `Send Chatwoot Attachment` → `Log MIRROR Sent`
+- **IMPORTANT:** Change `$('Sample Normalize Output')` to `$('Normalize Input')` in the JSON body expression (5 places)
+
+**Node 3: Log MIRROR Exit**
+- Copy the `Log MIRROR Exit` node
+- Paste into AWF-MIRROR
+- Wire FROM all 4 exit nodes:
+  - `Return Invalid` → `Log MIRROR Exit`
+  - `Return Deduped` → `Log MIRROR Exit` (BOTH Return Deduped nodes)
+  - `Return Self Guard Skip` → `Log MIRROR Exit`
+  - `Return Result` → `Log MIRROR Exit`
+- **IMPORTANT:** Change `$('Sample Normalize Output')` to `$('Normalize Input')` in the JSON body expression (5 places)
+
+### Step 5: Save and activate AWF-MIRROR
+
+The flow should now look like:
+```
+Normalize Input ──┬──▶ Input Valid? ──▶ (existing flow) ──▶ Send CW Msg ──┬──▶ Should Auto-Resolve?
+                  │                                                        │
+                  └──▶ Log MIRROR Entry (dead end)                         └──▶ Log MIRROR Sent (dead end)
+                                                                           
+Return Invalid ────┐
+Return Deduped ────┤
+Return Self Guard ─┤
+Return Result ─────┴──▶ Log MIRROR Exit (dead end)
+```
+
+### Phase 2 Diff Queries
+
+After 24–72 hours, run these queries:
+
+**Query P2-1: Three-layer comparison**
+```sql
+SELECT 'GW3B received' AS checkpoint, COUNT(*) AS total
+FROM n8n_message_log WHERE workflow = 'GW3B' AND timestamp > NOW() - INTERVAL '72 hours'
+UNION ALL
+SELECT 'MIRROR received' AS checkpoint, COUNT(*) AS total
+FROM n8n_message_log WHERE workflow = 'MIRROR-ENTRY' AND timestamp > NOW() - INTERVAL '72 hours'
+UNION ALL
+SELECT 'MIRROR sent to CW' AS checkpoint, COUNT(*) AS total
+FROM n8n_message_log WHERE workflow = 'MIRROR-SENT' AND timestamp > NOW() - INTERVAL '72 hours'
+UNION ALL
+SELECT 'MIRROR skipped/dropped' AS checkpoint, COUNT(*) AS total
+FROM n8n_message_log WHERE workflow = 'MIRROR-EXIT' AND status != 'mirrored' AND timestamp > NOW() - INTERVAL '72 hours';
+```
+
+**Query P2-2: Why did MIRROR skip messages?**
+```sql
+SELECT status, skip_reason, COUNT(*) AS total
+FROM n8n_message_log
+WHERE workflow = 'MIRROR-EXIT'
+  AND timestamp > NOW() - INTERVAL '72 hours'
+GROUP BY status, skip_reason
+ORDER BY total DESC;
+```
+
+**Query P2-3: Messages that entered MIRROR but never got sent to Chatwoot**
+```sql
+SELECT e.message_id, e.sender_phone, e.timestamp, e.clinic, e.status AS entry_status
+FROM n8n_message_log e
+LEFT JOIN n8n_message_log s ON e.message_id = s.message_id AND s.workflow = 'MIRROR-SENT'
+LEFT JOIN n8n_message_log x ON e.message_id = x.message_id AND x.workflow = 'MIRROR-EXIT'
+WHERE e.workflow = 'MIRROR-ENTRY'
+  AND s.id IS NULL
+  AND x.id IS NULL
+  AND e.timestamp > NOW() - INTERVAL '72 hours'
+ORDER BY e.timestamp DESC;
+```
+
+**Query P2-4: GW3B received but MIRROR never got (dispatch failure)**
+```sql
+SELECT g.message_id, g.sender_phone, g.timestamp, g.clinic
+FROM n8n_message_log g
+LEFT JOIN n8n_message_log m ON g.message_id = m.message_id AND m.workflow = 'MIRROR-ENTRY'
+WHERE g.workflow = 'GW3B'
+  AND m.id IS NULL
+  AND g.timestamp > NOW() - INTERVAL '72 hours'
+  AND g.from_me = false
+ORDER BY g.timestamp DESC;
+```
+
+**Query P2-5: Chatwoot send failures**
+```sql
+SELECT message_id, sender_phone, timestamp, clinic, skip_reason, chatwoot_message_id
+FROM n8n_message_log
+WHERE workflow = 'MIRROR-SENT'
+  AND status = 'send_failed'
+  AND timestamp > NOW() - INTERVAL '72 hours'
+ORDER BY timestamp DESC;
+```
+
+### Interpreting Phase 2 Results
+
+| GW3B | MIRROR-ENTRY | MIRROR-EXIT status | MIRROR-SENT | Diagnosis |
+|------|-------------|-------------------|-------------|-----------|
+| Yes | No | — | — | **GW3B→MIRROR dispatch failed** (Execute Workflow node error) |
+| Yes | Yes | `skipped` (invalid_input) | — | **Normalize Input rejected it** (missing phone, empty content) |
+| Yes | Yes | `deduped` | — | **Dedup false positive** — ChatwootMirrorDedupe already had the mirrorKey |
+| Yes | Yes | `skipped` (self_contact_guard) | — | **Self-message filtered** — message from clinic's own number |
+| Yes | Yes | — | Yes (send_failed) | **Chatwoot API error** — check Chatwoot API logs, rate limits |
+| Yes | Yes | `mirrored` | Yes (sent_ok) | **Message delivered to Chatwoot** — check Chatwoot inbox directly |
+
+---
+
 ## Expected Outcomes
 
 After running the audit for 72+ hours:
