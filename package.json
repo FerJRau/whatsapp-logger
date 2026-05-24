@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-logger",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "LOG_LEVEL=debug node index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "logger",
+    "baileys",
+    "audit"
+  ],
+  "author": "FerJRau",
+  "license": "ISC",
+  "description": "WhatsApp message logger using Baileys — independent audit trail for message delivery verification",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.105.4",
+    "@whiskeysockets/baileys": "^7.0.0-rc10",
+    "better-sqlite3": "^12.9.0",
+    "dotenv": "^17.4.2",
+    "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.20.1"
+  }
+}

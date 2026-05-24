@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  whatsapp-logger:
+    build: .
+    container_name: whatsapp-logger
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - AUTH_DIR=/app/auth_store
+      - SQLITE_PATH=/app/data/messages.db
+      - LOG_LEVEL=info
+    volumes:
+      # Persist auth state (QR login) across container restarts
+      - auth_data:/app/auth_store
+      # Persist SQLite database
+      - sqlite_data:/app/data
+
+volumes:
+  auth_data:
+  sqlite_data:
